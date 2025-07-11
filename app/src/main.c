@@ -37,6 +37,7 @@ main_scrcpy(int argc, char *argv[]) {
         .opts = scrcpy_options_default,
         .help = false,
         .version = false,
+        .server_only = false,
         .pause_on_exit = SC_PAUSE_ON_EXIT_FALSE,
     };
 
@@ -85,11 +86,16 @@ main_scrcpy(int argc, char *argv[]) {
 
     sc_log_configure();
 
+    // Choose between full scrcpy client or server-only mode
+    if (args.server_only) {
+        ret = scrcpy_server_only(&args.opts);
+    } else {
 #ifdef HAVE_USB
-    ret = args.opts.otg ? scrcpy_otg(&args.opts) : scrcpy(&args.opts);
+        ret = args.opts.otg ? scrcpy_otg(&args.opts) : scrcpy(&args.opts);
 #else
-    ret = scrcpy(&args.opts);
+        ret = scrcpy(&args.opts);
 #endif
+    }
 
 end:
     if (args.pause_on_exit == SC_PAUSE_ON_EXIT_TRUE ||

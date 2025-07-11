@@ -17,6 +17,7 @@ struct scrcpy_cli_args {
     struct scrcpy_options opts;
     bool help;
     bool version;
+    bool server_only;
     enum sc_pause_on_exit pause_on_exit;
 };
 

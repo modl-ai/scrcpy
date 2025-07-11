@@ -26,6 +26,9 @@
 #include "recorder.h"
 #include "screen.h"
 #include "server.h"
+#include "adb/adb.h"
+#include "util/env.h"
+#include "util/file.h"
 #include "uhid/gamepad_uhid.h"
 #include "uhid/keyboard_uhid.h"
 #include "uhid/mouse_uhid.h"
@@ -1064,5 +1067,89 @@ end:
 
     sc_server_destroy(&s->server);
 
+    return ret;
+}
+
+enum scrcpy_exit_code
+scrcpy_server_only(struct scrcpy_options *options) {
+    // Minimal SDL initialization for events only
+    if (SDL_Init(SDL_INIT_EVENTS)) {
+        LOGE("Could not initialize SDL: %s", SDL_GetError());
+        return SCRCPY_EXIT_FAILURE;
+    }
+
+    atexit(SDL_Quit);
+
+    enum scrcpy_exit_code ret = SCRCPY_EXIT_FAILURE;
+
+    // Initialize ADB
+    if (!sc_adb_init()) {
+        LOGE("Could not initialize ADB");
+        return SCRCPY_EXIT_FAILURE;
+    }
+
+    // Get device serial
+    const char *serial = options->serial;
+    if (!serial) {
+        // Try to find a device
+        struct sc_adb_device_selector selector = {
+            .type = SC_ADB_DEVICE_SELECT_ALL,
+            .serial = NULL,
+        };
+        
+        struct sc_adb_device device;
+        if (!sc_adb_select_device(NULL, &selector, 0, &device)) {
+            LOGE("No device found");
+            return SCRCPY_EXIT_FAILURE;
+        }
+        serial = device.serial;
+        sc_adb_device_destroy(&device);
+    }
+
+    LOGI("ADB device found:");
+    LOGI("    -->   (usb)  %s", serial);
+
+    // Push server to device
+    char *server_path = sc_get_env("SCRCPY_SERVER_PATH");
+    if (!server_path) {
+        server_path = sc_file_get_local_path("scrcpy-server");
+        if (!server_path) {
+            LOGE("Could not find scrcpy-server");
+            return SCRCPY_EXIT_FAILURE;
+        }
+    }
+
+    LOGD("Using server: %s", server_path);
+    
+    if (!sc_file_is_regular(server_path)) {
+        LOGE("'%s' does not exist or is not a regular file", server_path);
+        free(server_path);
+        return SCRCPY_EXIT_FAILURE;
+    }
+
+    bool ok = sc_adb_push(NULL, serial, server_path, "/data/local/tmp/scrcpy-server", 0);
+    free(server_path);
+    if (!ok) {
+        LOGE("Failed to push server to device");
+        return SCRCPY_EXIT_FAILURE;
+    }
+
+    LOGI("Server pushed to device successfully. Press Ctrl+C to stop.");
+
+    // Simple event loop that only handles quit events
+    SDL_Event event;
+    while (SDL_WaitEvent(&event)) {
+        switch (event.type) {
+            case SDL_QUIT:
+                LOGI("Quit requested");
+                ret = SCRCPY_EXIT_SUCCESS;
+                goto end;
+            default:
+                // Ignore other events
+                break;
+        }
+    }
+
+end:
     return ret;
 }

@@ -19,4 +19,7 @@ enum scrcpy_exit_code {
 enum scrcpy_exit_code
 scrcpy(struct scrcpy_options *options);
 
+enum scrcpy_exit_code
+scrcpy_server_only(struct scrcpy_options *options);
+
 #endif
