@@ -1157,11 +1157,11 @@ scrcpy_server_only(struct scrcpy_options *options) {
     // The server will handle socket creation when tunnel_forward=true is set
     LOGI("Starting server in listen mode (tunnel_forward=true)");
     LOGI("Server socket name: scrcpy_%08x", scid);
-    LOGI("");
+    LOGI(" ");
     LOGI("To connect to this server, run:");
     LOGI("  adb forward tcp:27183 localabstract:scrcpy_%08x", scid);
     LOGI("  # Then connect to localhost:27183");
-    LOGI("");
+    LOGI(" ");
     
     // Start server process using adb shell with proper argument escaping
     // The server expects: CLASSPATH=... app_process / com.genymobile.scrcpy.Server <version> [options...]

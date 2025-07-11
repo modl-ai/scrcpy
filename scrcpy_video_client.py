@@ -1,179 +1,242 @@
 #!/usr/bin/env python3
 """
-Scrcpy Video Stream Client
+Scrcpy Video Client
 
-This script demonstrates how to connect to a scrcpy video stream
-and decode the H.264 video data using Python.
-
-Requirements:
-    pip install opencv-python numpy av
+This script connects to a scrcpy video stream and displays it using OpenCV.
+It requires the ADB tunnel to be set up first.
 
 Usage:
-    python scrcpy_video_client.py [port]
+    python scrcpy_video_client.py [port] [socket_name]
     
 Example:
-    python scrcpy_video_client.py 27185
+    # First, set up the ADB tunnel:
+    # adb forward tcp:27183 localabstract:scrcpy_29c1bca9
+    
+    # Then run this script:
+    python scrcpy_video_client.py 27183
 """
 
 import socket
 import struct
-import threading
-import time
 import sys
+import time
 import cv2
 import numpy as np
-import av
-from io import BytesIO
+import subprocess
+import threading
 
 class ScrcpyVideoClient:
-    def __init__(self, host='127.0.0.1', port=27185):
+    def __init__(self, host='127.0.0.1', port=27183, socket_name=None):
         self.host = host
         self.port = port
+        self.socket_name = socket_name
         self.socket = None
         self.running = False
-        self.decoder = None
+        
+    def setup_adb_tunnel(self):
+        """Set up ADB tunnel if socket_name is provided"""
+        if self.socket_name:
+            cmd = f"adb forward tcp:{self.port} localabstract:{self.socket_name}"
+            print(f"Setting up ADB tunnel: {cmd}")
+            try:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print("ADB tunnel established successfully")
+                    return True
+                else:
+                    print(f"Failed to establish ADB tunnel: {result.stderr}")
+                    return False
+            except Exception as e:
+                print(f"Error setting up ADB tunnel: {e}")
+                return False
+        return True
         
     def connect(self):
-        """Connect to the scrcpy video stream"""
+        """Connect to the scrcpy stream"""
         try:
+            # Set up ADB tunnel if needed
+            if not self.setup_adb_tunnel():
+                return False
+                
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.host, self.port))
-            print(f"Connected to scrcpy video stream on {self.host}:{self.port}")
+            print(f"Connected to scrcpy stream on {self.host}:{self.port}")
             return True
         except Exception as e:
             print(f"Failed to connect: {e}")
             return False
     
-    def read_packet(self):
-        """Read a single packet from the video stream"""
+    def read_device_meta(self):
+        """Read device metadata (device name) from the first socket"""
         try:
-            # Read packet header (4 bytes for length)
-            header = self.socket.recv(4)
-            if len(header) != 4:
-                return None
-            
-            # Parse packet length
-            packet_length = struct.unpack('>I', header)[0]
-            
-            # Read packet data
-            packet_data = b''
-            while len(packet_data) < packet_length:
-                chunk = self.socket.recv(packet_length - len(packet_data))
-                if not chunk:
-                    return None
-                packet_data += chunk
-            
-            return packet_data
-            
+            # Read device name (64 bytes)
+            device_name_bytes = self.socket.recv(64)
+            if len(device_name_bytes) == 64:
+                device_name = device_name_bytes.decode('utf-8').rstrip('\x00')
+                print(f"Device: {device_name}")
+                return True
+            else:
+                print("Failed to read device metadata")
+                return False
         except Exception as e:
-            print(f"Error reading packet: {e}")
+            print(f"Error reading device metadata: {e}")
+            return False
+    
+    def read_video_meta(self):
+        """Read video metadata (codec info and dimensions)"""
+        try:
+            # Read codec metadata (12 bytes)
+            # - codec id (4 bytes)
+            # - width (4 bytes) 
+            # - height (4 bytes)
+            meta = self.socket.recv(12)
+            if len(meta) == 12:
+                codec_id, width, height = struct.unpack('>III', meta)
+                print(f"Video: {width}x{height}, codec: {codec_id}")
+                return width, height
+            else:
+                print("Failed to read video metadata")
+                return None, None
+        except Exception as e:
+            print(f"Error reading video metadata: {e}")
+            return None, None
+    
+    def read_frame_header(self):
+        """Read frame header (12 bytes)"""
+        try:
+            header = self.socket.recv(12)
+            if len(header) == 12:
+                # Parse frame header
+                # - config packet flag (1 bit)
+                # - key frame flag (1 bit) 
+                # - PTS (62 bits)
+                # - packet size (32 bits)
+                flags_pts, packet_size = struct.unpack('>QI', header)
+                is_config = (flags_pts >> 63) & 1
+                is_keyframe = (flags_pts >> 62) & 1
+                pts = flags_pts & ((1 << 62) - 1)
+                return {
+                    'is_config': is_config,
+                    'is_keyframe': is_keyframe,
+                    'pts': pts,
+                    'size': packet_size
+                }
+            else:
+                return None
+        except Exception as e:
+            print(f"Error reading frame header: {e}")
             return None
     
-    def decode_h264_frame(self, h264_data):
-        """Decode H.264 data to RGB frame using PyAV"""
+    def read_frame_data(self, size):
+        """Read frame data"""
         try:
-            # Create a BytesIO object for PyAV
-            input_buffer = BytesIO(h264_data)
+            data = b''
+            while len(data) < size:
+                chunk = self.socket.recv(size - len(data))
+                if not chunk:
+                    return None
+                data += chunk
+            return data
+        except Exception as e:
+            print(f"Error reading frame data: {e}")
+            return None
+    
+    def decode_h264_frame(self, frame_data, width, height):
+        """Decode H.264 frame using OpenCV"""
+        try:
+            # Create a temporary file to write the H.264 data
+            import tempfile
+            import os
             
-            # Use PyAV to decode the H.264 data
-            container = av.open(input_buffer, format='h264')
+            with tempfile.NamedTemporaryFile(suffix='.h264', delete=False) as temp_file:
+                temp_file.write(frame_data)
+                temp_file_path = temp_file.name
             
-            for frame in container.decode(video=0):
-                # Convert to RGB
-                rgb_frame = frame.to_ndarray(format='rgb24')
-                return rgb_frame
+            # Read the H.264 file with OpenCV
+            cap = cv2.VideoCapture(temp_file_path)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                cap.release()
                 
+                # Clean up temp file
+                os.unlink(temp_file_path)
+                
+                if ret:
+                    return frame
+            
+            # Clean up temp file if decoding failed
+            os.unlink(temp_file_path)
+            return None
+            
         except Exception as e:
             print(f"Error decoding H.264 frame: {e}")
             return None
     
-    def display_frame(self, frame):
-        """Display the frame using OpenCV"""
-        if frame is not None:
-            # Convert RGB to BGR for OpenCV
-            bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            cv2.imshow('Scrcpy Video Stream', bgr_frame)
-            
-            # Press 'q' to quit
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                return False
-        return True
-    
-    def video_loop(self):
-        """Main video processing loop"""
-        print("Starting video stream...")
+    def run(self):
+        """Main loop to read and display video frames"""
+        if not self.connect():
+            return
+        
+        # Read device metadata
+        if not self.read_device_meta():
+            return
+        
+        # Read video metadata
+        width, height = self.read_video_meta()
+        if width is None or height is None:
+            return
+        
+        print(f"Starting video display ({width}x{height})")
         print("Press 'q' to quit")
         
+        self.running = True
         frame_count = 0
-        start_time = time.time()
         
         while self.running:
-            # Read packet from socket
-            packet_data = self.read_packet()
-            if packet_data is None:
-                print("Connection closed")
+            # Read frame header
+            header = self.read_frame_header()
+            if header is None:
                 break
             
-            # Decode H.264 frame
-            frame = self.decode_h264_frame(packet_data)
+            # Read frame data
+            frame_data = self.read_frame_data(header['size'])
+            if frame_data is None:
+                break
+            
+            # Decode and display frame
+            frame = self.decode_h264_frame(frame_data, width, height)
             if frame is not None:
+                cv2.imshow('Scrcpy Video', frame)
                 frame_count += 1
                 
-                # Calculate FPS
-                elapsed_time = time.time() - start_time
-                if elapsed_time > 0:
-                    fps = frame_count / elapsed_time
-                    print(f"FPS: {fps:.2f}, Frame: {frame_count}", end='\r')
-                
-                # Display frame
-                if not self.display_frame(frame):
+                # Handle key press
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
-            else:
-                print("Failed to decode frame")
         
-        cv2.destroyAllWindows()
+        self.cleanup()
     
-    def start(self):
-        """Start the video client"""
-        if not self.connect():
-            return False
-        
-        self.running = True
-        
-        # Start video processing in a separate thread
-        video_thread = threading.Thread(target=self.video_loop)
-        video_thread.daemon = True
-        video_thread.start()
-        
-        try:
-            # Keep main thread alive
-            while self.running:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nStopping video client...")
-        finally:
-            self.stop()
-        
-        return True
-    
-    def stop(self):
-        """Stop the video client"""
+    def cleanup(self):
+        """Clean up resources"""
         self.running = False
         if self.socket:
             self.socket.close()
         cv2.destroyAllWindows()
 
 def main():
-    # Get port from command line argument or use default
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 27185
+    if len(sys.argv) < 2:
+        print("Usage: python scrcpy_video_client.py <port> [socket_name]")
+        print("Example: python scrcpy_video_client.py 27183 scrcpy_29c1bca9")
+        print("")
+        print("Note: Make sure to set up the ADB tunnel first:")
+        print("  adb forward tcp:27183 localabstract:scrcpy_29c1bca9")
+        sys.exit(1)
     
-    print(f"Scrcpy Video Client")
-    print(f"Connecting to port: {port}")
-    print(f"Make sure scrcpy server is running with --server-only mode")
-    print()
+    port = int(sys.argv[1])
+    socket_name = sys.argv[2] if len(sys.argv) > 2 else None
     
-    client = ScrcpyVideoClient(port=port)
-    client.start()
+    client = ScrcpyVideoClient(port=port, socket_name=socket_name)
+    client.run()
 
 if __name__ == "__main__":
     main() 
