@@ -1179,7 +1179,7 @@ scrcpy_server_only(struct scrcpy_options *options) {
     char *server_cmd = NULL;
     int r_cmd = asprintf(&server_cmd, 
         "CLASSPATH=/data/local/tmp/scrcpy-server app_process / com.genymobile.scrcpy.Server %s "
-        "tunnel_forward=true scid=%08x log_level=%s",
+        "tunnel_forward=true scid=%08x log_level=%s audio=false control=false",
         SCRCPY_VERSION, scid, log_level_str);
     if (r_cmd == -1) {
         LOG_OOM();

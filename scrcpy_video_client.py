@@ -49,7 +49,10 @@ class ScrcpyVideoClient:
             except Exception as e:
                 print(f"Error setting up ADB tunnel: {e}")
                 return False
-        return True
+        else:
+            # If no socket_name provided, assume tunnel is already set up
+            print(f"Connecting to existing tunnel on port {self.port}")
+            return True
         
     def connect(self):
         """Connect to the scrcpy stream"""
@@ -61,6 +64,24 @@ class ScrcpyVideoClient:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.host, self.port))
             print(f"Connected to scrcpy stream on {self.host}:{self.port}")
+            
+            # Check for dummy byte (sent on forward connections)
+            print("Checking for dummy byte...")
+            self.socket.settimeout(2.0)
+            try:
+                dummy_byte = self.socket.recv(1)
+                if dummy_byte:
+                    print(f"Dummy byte detected: {dummy_byte.hex()}")
+                else:
+                    print("No dummy byte detected")
+            except socket.timeout:
+                print("Timeout waiting for dummy byte - proceeding anyway")
+            except Exception as e:
+                print(f"Error checking for dummy byte: {e}")
+            
+            # Reset timeout for normal operation
+            self.socket.settimeout(None)
+            
             return True
         except Exception as e:
             print(f"Failed to connect: {e}")
@@ -76,7 +97,7 @@ class ScrcpyVideoClient:
                 print(f"Device: {device_name}")
                 return True
             else:
-                print("Failed to read device metadata")
+                print(f"Failed to read device metadata, got {len(device_name_bytes)} bytes")
                 return False
         except Exception as e:
             print(f"Error reading device metadata: {e}")
@@ -92,10 +113,17 @@ class ScrcpyVideoClient:
             meta = self.socket.recv(12)
             if len(meta) == 12:
                 codec_id, width, height = struct.unpack('>III', meta)
-                print(f"Video: {width}x{height}, codec: {codec_id}")
+                print(f"Video: {width}x{height}, codec: 0x{codec_id:08x}")
+                
+                # Decode codec name
+                codec_name = ""
+                for i in range(4):
+                    codec_name += chr((codec_id >> (24 - i * 8)) & 0xFF)
+                print(f"Codec name: '{codec_name}'")
+                
                 return width, height
             else:
-                print("Failed to read video metadata")
+                print(f"Failed to read video metadata, got {len(meta)} bytes")
                 return None, None
         except Exception as e:
             print(f"Error reading video metadata: {e}")
@@ -122,6 +150,7 @@ class ScrcpyVideoClient:
                     'size': packet_size
                 }
             else:
+                print(f"Failed to read frame header, got {len(header)} bytes")
                 return None
         except Exception as e:
             print(f"Error reading frame header: {e}")
@@ -142,34 +171,22 @@ class ScrcpyVideoClient:
             return None
     
     def decode_h264_frame(self, frame_data, width, height):
-        """Decode H.264 frame using OpenCV"""
+        """Decode H.264 frame data using OpenCV"""
         try:
-            # Create a temporary file to write the H.264 data
-            import tempfile
-            import os
+            # Create a numpy array from the frame data
+            frame_array = np.frombuffer(frame_data, dtype=np.uint8)
             
-            with tempfile.NamedTemporaryFile(suffix='.h264', delete=False) as temp_file:
-                temp_file.write(frame_data)
-                temp_file_path = temp_file.name
+            # Decode the H.264 frame
+            frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
             
-            # Read the H.264 file with OpenCV
-            cap = cv2.VideoCapture(temp_file_path)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                cap.release()
-                
-                # Clean up temp file
-                os.unlink(temp_file_path)
-                
-                if ret:
-                    return frame
-            
-            # Clean up temp file if decoding failed
-            os.unlink(temp_file_path)
-            return None
-            
+            if frame is not None:
+                # Resize to the expected dimensions
+                frame = cv2.resize(frame, (width, height))
+                return frame
+            else:
+                return None
         except Exception as e:
-            print(f"Error decoding H.264 frame: {e}")
+            print(f"Error decoding frame: {e}")
             return None
     
     def run(self):
@@ -224,16 +241,15 @@ class ScrcpyVideoClient:
         cv2.destroyAllWindows()
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python scrcpy_video_client.py <port> [socket_name]")
-        print("Example: python scrcpy_video_client.py 27183 scrcpy_29c1bca9")
-        print("")
-        print("Note: Make sure to set up the ADB tunnel first:")
-        print("  adb forward tcp:27183 localabstract:scrcpy_29c1bca9")
-        sys.exit(1)
+    if len(sys.argv) >= 2:
+        port = int(sys.argv[1])
+    else:
+        port = 27183
     
-    port = int(sys.argv[1])
-    socket_name = sys.argv[2] if len(sys.argv) > 2 else None
+    if len(sys.argv) >= 3:
+        socket_name = sys.argv[2]
+    else:
+        socket_name = "scrcpy_29c1bca9"
     
     client = ScrcpyVideoClient(port=port, socket_name=socket_name)
     client.run()
