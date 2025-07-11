@@ -44,6 +44,8 @@
 #include "util/rand.h"
 #include "util/timeout.h"
 #include "util/tick.h"
+#include "util/process.h"
+#include "util/net_intr.h"
 #ifdef HAVE_V4L2
 # include "v4l2_sink.h"
 #endif
@@ -338,6 +340,8 @@ sc_server_on_connected(struct sc_server *server, void *userdata) {
     sc_push_event(SC_EVENT_SERVER_CONNECTED);
 }
 
+
+
 static void
 sc_server_on_disconnected(struct sc_server *server, void *userdata) {
     (void) server;
@@ -379,6 +383,8 @@ init_sdl_gamepads(void) {
         }
     }
 }
+
+
 
 enum scrcpy_exit_code
 scrcpy(struct scrcpy_options *options) {
@@ -1070,6 +1076,10 @@ end:
     return ret;
 }
 
+
+
+
+
 enum scrcpy_exit_code
 scrcpy_server_only(struct scrcpy_options *options) {
     // Minimal SDL initialization for events only
@@ -1134,8 +1144,62 @@ scrcpy_server_only(struct scrcpy_options *options) {
         return SCRCPY_EXIT_FAILURE;
     }
 
-    LOGI("Server pushed to device successfully. Press Ctrl+C to stop.");
-
+    LOGI("Server pushed to device successfully.");
+    LOGI("Starting server process...");
+    
+    // For server-only mode, we need to manually start the server process
+    // without using the normal server infrastructure that expects a client connection
+    
+    // Generate a unique socket name
+    uint32_t scid = scrcpy_generate_scid();
+    
+    // In server-only mode, we don't set up the ADB tunnel ourselves
+    // The server will handle socket creation when tunnel_forward=true is set
+    LOGI("Starting server in listen mode (tunnel_forward=true)");
+    LOGI("Server socket name: scrcpy_%08x", scid);
+    LOGI("");
+    LOGI("To connect to this server, run:");
+    LOGI("  adb forward tcp:27183 localabstract:scrcpy_%08x", scid);
+    LOGI("  # Then connect to localhost:27183");
+    LOGI("");
+    
+    // Start server process using adb shell with proper argument escaping
+    // The server expects: CLASSPATH=... app_process / com.genymobile.scrcpy.Server <version> [options...]
+    // For server-only mode, we need to make the server listen for connections
+    const char *log_level_str;
+    switch (options->log_level) {
+        case SC_LOG_LEVEL_VERBOSE: log_level_str = "verbose"; break;
+        case SC_LOG_LEVEL_DEBUG: log_level_str = "debug"; break;
+        case SC_LOG_LEVEL_INFO: log_level_str = "info"; break;
+        case SC_LOG_LEVEL_WARN: log_level_str = "warn"; break;
+        case SC_LOG_LEVEL_ERROR: log_level_str = "error"; break;
+        default: log_level_str = "info"; break;
+    }
+    
+    char *server_cmd = NULL;
+    int r_cmd = asprintf(&server_cmd, 
+        "CLASSPATH=/data/local/tmp/scrcpy-server app_process / com.genymobile.scrcpy.Server %s "
+        "tunnel_forward=true scid=%08x log_level=%s",
+        SCRCPY_VERSION, scid, log_level_str);
+    if (r_cmd == -1) {
+        LOG_OOM();
+        return SCRCPY_EXIT_FAILURE;
+    }
+    
+    const char *adb_args[] = {
+        "adb", "shell", server_cmd, NULL
+    };
+    
+    sc_pid pid;
+    enum sc_process_result result = sc_process_execute(adb_args, &pid, 0);
+    if (result != SC_PROCESS_SUCCESS || pid == SC_PROCESS_NONE) {
+        LOGE("Failed to start server process");
+        free(server_cmd);
+        return SCRCPY_EXIT_FAILURE;
+    }
+    
+    LOGI("Server started successfully. Press Ctrl+C to stop.");
+    
     // Simple event loop that only handles quit events
     SDL_Event event;
     while (SDL_WaitEvent(&event)) {
@@ -1151,5 +1215,11 @@ scrcpy_server_only(struct scrcpy_options *options) {
     }
 
 end:
+    // Clean up
+    sc_process_terminate(pid);
+    sc_process_wait(pid, true);
+    sc_process_close(pid);
+    free(server_cmd);
+
     return ret;
 }

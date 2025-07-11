@@ -711,6 +711,17 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
     server->audio_socket = audio_socket;
     server->control_socket = control_socket;
 
+    // Log the port information for server-only mode
+    if (server->params.video) {
+        LOGI("Video socket established on port %" PRIu16, tunnel->local_port);
+    }
+    if (server->params.audio) {
+        LOGI("Audio socket established on port %" PRIu16, tunnel->local_port);
+    }
+    if (server->params.control) {
+        LOGI("Control socket established on port %" PRIu16, tunnel->local_port);
+    }
+
     return true;
 
 fail:
@@ -1062,6 +1073,9 @@ run_server(void *data) {
     if (!ok) {
         goto error_connection_failed;
     }
+
+    // Log the port information for server-only mode
+    LOGI("ADB tunnel established on port %" PRIu16, server->tunnel.local_port);
 
     // server will connect to our server socket
     sc_pid pid = execute_server(server, params);
